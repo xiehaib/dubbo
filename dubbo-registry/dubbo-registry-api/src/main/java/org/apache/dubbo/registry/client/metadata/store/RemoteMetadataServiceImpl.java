@@ -35,15 +35,10 @@ import org.apache.dubbo.rpc.RpcException;
 
 import java.util.Map;
 
-import static org.apache.dubbo.common.constants.CommonConstants.APPLICATION_KEY;
 import static org.apache.dubbo.common.constants.CommonConstants.CONSUMER_SIDE;
-import static org.apache.dubbo.common.constants.CommonConstants.GROUP_KEY;
-import static org.apache.dubbo.common.constants.CommonConstants.INTERFACE_KEY;
 import static org.apache.dubbo.common.constants.CommonConstants.PID_KEY;
 import static org.apache.dubbo.common.constants.CommonConstants.PROVIDER_SIDE;
-import static org.apache.dubbo.common.constants.CommonConstants.SIDE_KEY;
 import static org.apache.dubbo.common.constants.CommonConstants.TIMESTAMP_KEY;
-import static org.apache.dubbo.common.constants.CommonConstants.VERSION_KEY;
 import static org.apache.dubbo.common.constants.RegistryConstants.REGISTRY_CLUSTER_KEY;
 
 public class RemoteMetadataServiceImpl {
@@ -55,7 +50,7 @@ public class RemoteMetadataServiceImpl {
     }
 
     public Map<String, MetadataReport> getMetadataReports() {
-        return MetadataReportInstance.getMetadataReports(true);
+        return MetadataReportInstance.getMetadataReports(false);
     }
 
     public void publishMetadata(String serviceName) {
@@ -68,6 +63,10 @@ public class RemoteMetadataServiceImpl {
                 MetadataReport metadataReport = getMetadataReports().get(registryCluster);
                 if (metadataReport == null) {
                     metadataReport = getMetadataReports().entrySet().iterator().next().getValue();
+                }
+                logger.info("Publishing metadata to " + metadataReport.getClass().getSimpleName());
+                if (logger.isDebugEnabled()) {
+                    logger.debug(metadataInfo.toString());
                 }
                 metadataReport.publishAppMetadata(identifier, metadataInfo);
                 metadataInfo.markReported();
@@ -85,11 +84,11 @@ public class RemoteMetadataServiceImpl {
         if (metadataReport == null) {
             metadataReport = getMetadataReports().entrySet().iterator().next().getValue();
         }
-        return metadataReport.getAppMetadata(identifier, instance.getMetadata());
+        return metadataReport.getAppMetadata(identifier, instance.getExtendParams());
     }
 
     public void publishServiceDefinition(URL url) {
-        String side = url.getParameter(SIDE_KEY);
+        String side = url.getSide();
         if (PROVIDER_SIDE.equalsIgnoreCase(side)) {
             //TODO, the params part is duplicate with that stored by exportURL(url), can be further optimized in the future.
             publishProvider(url);
@@ -106,7 +105,7 @@ public class RemoteMetadataServiceImpl {
                 Constants.BIND_PORT_KEY, TIMESTAMP_KEY);
 
         try {
-            String interfaceName = providerUrl.getParameter(INTERFACE_KEY);
+            String interfaceName = providerUrl.getServiceInterface();
             if (StringUtils.isNotEmpty(interfaceName)) {
                 Class interfaceClass = Class.forName(interfaceName);
                 FullServiceDefinition fullServiceDefinition = ServiceDefinitionBuilder.buildFullDefinition(interfaceClass,
@@ -114,8 +113,8 @@ public class RemoteMetadataServiceImpl {
                 for (Map.Entry<String, MetadataReport> entry : getMetadataReports().entrySet()) {
                     MetadataReport metadataReport = entry.getValue();
                     metadataReport.storeProviderMetadata(new MetadataIdentifier(providerUrl.getServiceInterface(),
-                            providerUrl.getParameter(VERSION_KEY), providerUrl.getParameter(GROUP_KEY),
-                            PROVIDER_SIDE, providerUrl.getParameter(APPLICATION_KEY)), fullServiceDefinition);
+                            providerUrl.getVersion(), providerUrl.getGroup(),
+                            PROVIDER_SIDE, providerUrl.getApplication()), fullServiceDefinition);
                 }
                 return;
             }
@@ -131,8 +130,8 @@ public class RemoteMetadataServiceImpl {
                 Constants.BIND_PORT_KEY, TIMESTAMP_KEY);
         getMetadataReports().forEach((registryKey, config) -> {
             config.storeConsumerMetadata(new MetadataIdentifier(url.getServiceInterface(),
-                    url.getParameter(VERSION_KEY), url.getParameter(GROUP_KEY), CONSUMER_SIDE,
-                    url.getParameter(APPLICATION_KEY)), url.getParameters());
+                    url.getVersion(), url.getGroup(), CONSUMER_SIDE,
+                    url.getApplication()), url.getParameters());
         });
     }
 

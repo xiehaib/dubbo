@@ -37,4 +37,5 @@ public class MappingChangedEvent {
     public void setApps(Set<String> apps) {
         this.apps = apps;
     }
+
 }

@@ -23,15 +23,16 @@ import org.apache.dubbo.common.logger.LoggerFactory;
 import org.apache.dubbo.common.utils.Assert;
 import org.apache.dubbo.common.utils.CollectionUtils;
 import org.apache.dubbo.common.utils.NetUtils;
+import org.apache.dubbo.registry.AddressListener;
 import org.apache.dubbo.registry.NotifyListener;
 import org.apache.dubbo.registry.client.event.listener.ServiceInstancesChangedListener;
 import org.apache.dubbo.registry.integration.DynamicDirectory;
 import org.apache.dubbo.rpc.Invoker;
 import org.apache.dubbo.rpc.Protocol;
 import org.apache.dubbo.rpc.RpcContext;
+import org.apache.dubbo.rpc.cluster.RouterChain;
 
 import java.util.ArrayList;
-import java.util.Collection;
 import java.util.Collections;
 import java.util.HashMap;
 import java.util.List;
@@ -40,6 +41,8 @@ import java.util.Map;
 import static org.apache.dubbo.common.constants.CommonConstants.DISABLED_KEY;
 import static org.apache.dubbo.common.constants.CommonConstants.ENABLED_KEY;
 import static org.apache.dubbo.common.constants.RegistryConstants.EMPTY_PROTOCOL;
+import static org.apache.dubbo.common.constants.RegistryConstants.REGISTRY_TYPE_KEY;
+import static org.apache.dubbo.common.constants.RegistryConstants.SERVICE_REGISTRY_TYPE;
 
 public class ServiceDiscoveryRegistryDirectory<T> extends DynamicDirectory<T> implements NotifyListener {
     private static final Logger logger = LoggerFactory.getLogger(ServiceDiscoveryRegistryDirectory.class);
@@ -51,6 +54,11 @@ public class ServiceDiscoveryRegistryDirectory<T> extends DynamicDirectory<T> im
 
     public ServiceDiscoveryRegistryDirectory(Class<T> serviceType, URL url) {
         super(serviceType, url);
+    }
+
+    @Override
+    public void buildRouterChain(URL url) {
+        this.setRouterChain(RouterChain.buildChain(url.addParameter(REGISTRY_TYPE_KEY, SERVICE_REGISTRY_TYPE)));
     }
 
     @Override
@@ -73,26 +81,31 @@ public class ServiceDiscoveryRegistryDirectory<T> extends DynamicDirectory<T> im
     public synchronized void notify(List<URL> instanceUrls) {
         // Set the context of the address notification thread.
         RpcContext.setRpcContext(getConsumerUrl());
+
+        /**
+         * 3.x added for extend URL address
+         */
+        ExtensionLoader<AddressListener> addressListenerExtensionLoader = ExtensionLoader.getExtensionLoader(AddressListener.class);
+        List<AddressListener> supportedListeners = addressListenerExtensionLoader.getActivateExtension(getUrl(), (String[]) null);
+        if (supportedListeners != null && !supportedListeners.isEmpty()) {
+            for (AddressListener addressListener : supportedListeners) {
+                instanceUrls = addressListener.notify(instanceUrls, getConsumerUrl(), this);
+            }
+        }
+
         refreshInvoker(instanceUrls);
     }
 
     private void refreshInvoker(List<URL> invokerUrls) {
-        Assert.notNull(invokerUrls, "invokerUrls should not be null, use empty InstanceAddressURL to clear address.");
+        Assert.notNull(invokerUrls, "invokerUrls should not be null, use empty url list to clear address.");
 
-        if (invokerUrls.size() == 1) {
-            URL url = invokerUrls.get(0);
-            if (!(url instanceof InstanceAddressURL)) {
-                throw new IllegalStateException("use empty InstanceAddressURL to clear address");
-            } else {
-                InstanceAddressURL instanceAddressURL = (InstanceAddressURL) url;
-                if (instanceAddressURL.getInstance() == null) {
-                    this.forbidden = true; // Forbid to access
-                    this.invokers = Collections.emptyList();
-                    routerChain.setInvokers(this.invokers);
-                    destroyAllInvokers(); // Close all invokers
-                    return;
-                }
-            }
+        if (invokerUrls.size() == 0) {
+            logger.info("Received empty url list...");
+            this.forbidden = true; // Forbid to access
+            this.invokers = Collections.emptyList();
+            routerChain.setInvokers(this.invokers);
+            destroyAllInvokers(); // Close all invokers
+            return;
         }
 
         this.forbidden = false; // Allow to access
@@ -102,6 +115,7 @@ public class ServiceDiscoveryRegistryDirectory<T> extends DynamicDirectory<T> im
         }
 
         Map<String, Invoker<T>> newUrlInvokerMap = toInvokers(invokerUrls);// Translate url list to Invoker map
+        logger.info("Refreshed invoker size " + newUrlInvokerMap.size());
 
         if (CollectionUtils.isEmptyMap(newUrlInvokerMap)) {
             logger.error(new IllegalStateException("Cannot create invokers from url address list (total " + invokerUrls.size() + ")"));
@@ -122,6 +136,9 @@ public class ServiceDiscoveryRegistryDirectory<T> extends DynamicDirectory<T> im
                 logger.warn("destroyUnusedInvokers error. ", e);
             }
         }
+
+        // notify invokers refreshed
+        this.invokersChanged();
     }
 
     /**
@@ -151,7 +168,7 @@ public class ServiceDiscoveryRegistryDirectory<T> extends DynamicDirectory<T> im
             // FIXME, some keys may need to be removed.
             instanceAddressURL.addConsumerParams(getConsumerUrl().getProtocolServiceKey(), queryMap);
 
-            Invoker<T> invoker = urlInvokerMap == null ? null : urlInvokerMap.get(instanceAddressURL.getAddress());
+            Invoker<T> invoker = urlInvokerMap == null ? null : urlInvokerMap.remove(instanceAddressURL.getAddress());
             if (invoker == null || urlChanged(invoker, instanceAddressURL)) { // Not in the cache, refer again
                 try {
                     boolean enabled = true;
@@ -194,7 +211,8 @@ public class ServiceDiscoveryRegistryDirectory<T> extends DynamicDirectory<T> im
     /**
      * Close all invokers
      */
-    private void destroyAllInvokers() {
+    @Override
+    protected void destroyAllInvokers() {
         Map<String, Invoker<T>> localUrlInvokerMap = this.urlInvokerMap; // local reference
         if (localUrlInvokerMap != null) {
             for (Invoker<T> invoker : new ArrayList<>(localUrlInvokerMap.values())) {
@@ -221,66 +239,24 @@ public class ServiceDiscoveryRegistryDirectory<T> extends DynamicDirectory<T> im
             destroyAllInvokers();
             return;
         }
-        // check deleted invoker
-        List<String> deleted = null;
-        if (oldUrlInvokerMap != null) {
-            Collection<Invoker<T>> newInvokers = newUrlInvokerMap.values();
-            for (Map.Entry<String, Invoker<T>> entry : oldUrlInvokerMap.entrySet()) {
-                if (!newInvokers.contains(entry.getValue())) {
-                    if (deleted == null) {
-                        deleted = new ArrayList<>();
-                    }
-                    deleted.add(entry.getKey());
-                }
-            }
-        }
 
-        if (deleted != null) {
-            for (String addressKey : deleted) {
-                if (addressKey != null) {
-                    Invoker<T> invoker = oldUrlInvokerMap.remove(addressKey);
-                    if (invoker != null) {
-                        try {
-                            invoker.destroy();
-                            if (logger.isDebugEnabled()) {
-                                logger.debug("destroy invoker[" + invoker.getUrl() + "] success. ");
-                            }
-                        } catch (Exception e) {
-                            logger.warn("destroy invoker[" + invoker.getUrl() + "] failed. " + e.getMessage(), e);
-                        }
-                    }
-                }
-            }
-        }
-    }
-
-    @Override
-    public void destroy() {
-        if (isDestroyed()) {
+        if (oldUrlInvokerMap == null || oldUrlInvokerMap.size() == 0) {
             return;
         }
 
-        // unregister.
-        try {
-            if (getRegisteredConsumerUrl() != null && registry != null && registry.isAvailable()) {
-                registry.unregister(getRegisteredConsumerUrl());
+        for (Map.Entry<String, Invoker<T>> entry : oldUrlInvokerMap.entrySet()) {
+            Invoker<T> invoker = entry.getValue();
+            if (invoker != null) {
+                try {
+                    invoker.destroy();
+                    if (logger.isDebugEnabled()) {
+                        logger.debug("destroy invoker[" + invoker.getUrl() + "] success. ");
+                    }
+                } catch (Exception e) {
+                    logger.warn("destroy invoker[" + invoker.getUrl() + "] failed. " + e.getMessage(), e);
+                }
             }
-        } catch (Throwable t) {
-            logger.warn("unexpected error when unregister service " + serviceKey + "from registry" + registry.getUrl(), t);
         }
-        // unsubscribe.
-        try {
-            if (getConsumerUrl() != null && registry != null && registry.isAvailable()) {
-                registry.unsubscribe(getConsumerUrl(), this);
-            }
-        } catch (Throwable t) {
-            logger.warn("unexpected error when unsubscribe service " + serviceKey + "from registry" + registry.getUrl(), t);
-        }
-        super.destroy(); // must be executed after unsubscribing
-        try {
-            destroyAllInvokers();
-        } catch (Throwable t) {
-            logger.warn("Failed to destroy service " + serviceKey, t);
-        }
+        logger.info(oldUrlInvokerMap.size() + " deprecated invokers deleted.");
     }
 }

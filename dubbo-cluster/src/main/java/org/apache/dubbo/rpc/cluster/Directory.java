@@ -18,6 +18,7 @@ package org.apache.dubbo.rpc.cluster;
 
 import org.apache.dubbo.common.Node;
 import org.apache.dubbo.common.URL;
+import org.apache.dubbo.common.utils.CollectionUtils;
 import org.apache.dubbo.rpc.Invocation;
 import org.apache.dubbo.rpc.Invoker;
 import org.apache.dubbo.rpc.RpcException;
@@ -51,4 +52,13 @@ public interface Directory<T> extends Node {
 
     URL getConsumerUrl();
 
+    boolean isDestroyed();
+
+    default boolean hasInvokers() {
+        return CollectionUtils.isNotEmpty(getAllInvokers());
+    }
+
+    void discordAddresses();
+
+    RouterChain<T> getRouterChain();
 }
